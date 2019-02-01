@@ -1,20 +1,21 @@
 package main
 
 import (
+	"io/ioutil"
 	"log"
-	"path"
+	"os"
+	"path/filepath"
 
 	"github.com/BurntSushi/xgb/xproto"
 	"github.com/BurntSushi/xgbutil"
 	"github.com/BurntSushi/xgbutil/xevent"
 	"github.com/BurntSushi/xgbutil/xwindow"
-	"github.com/gobuffalo/packr/v2"
+	"github.com/golang/freetype/truetype"
 	"golang.org/x/image/font"
-	"golang.org/x/image/font/plan9font"
 )
 
 var (
-	box = packr.New("box", "./box")
+	//box = packr.New("box", "./box")
 
 	// Connection to the X server.
 	X *xgbutil.XUtil
@@ -26,31 +27,47 @@ var (
 func main() {
 	// Initialize X.
 	if err := initX(); err != nil {
-		log.Fatalln(err)
+		log.Fatalf("cannot initialize X: %v", err)
 	}
 
 	// Initialize font.
 	if err := initFont(); err != nil {
-		log.Fatalln(err)
+		log.Fatalf("cannot initialize font: %v", err)
 	}
 
 	// Initialize bar.
-	bar, err := initBar(0, 0, 1920, 29)
+	bar, err := initBar(0, 0, 1920, 26)
 	if err != nil {
-		log.Fatalln(err)
+		log.Fatalf("cannot initialize bar: %v", err)
 	}
 
+	bar.SetGroups(
+		Group{
+			Align:  AlignLeft,
+			Blocks: append(bar.workspace(), bar.window()),
+		},
+		Group{
+			Align:  AlignCenter,
+			Blocks: []*Block{bar.clock()},
+		},
+		Group{
+			Align:  AlignRight,
+			Blocks: []*Block{bar.battery(), bar.wifi()},
+		},
+	)
 	// Initialize blocks.
-	go bar.initBlocks([]func(){
-		bar.window,
-		bar.workspace,
-		bar.clock,
-		bar.music,
-		bar.todo,
-	})
+	//go bar.initBlocks([]func(){
+	//bar.workspace,
+	//bar.window,
+	//bar.clock,
+	//bar.battery,
+	//bar.wifi,
+	////bar.music,
+	////bar.todo,
+	//})
 
 	// Listen for redraw events.
-	bar.listen()
+	bar.drawLoop()
 }
 
 func initX() error {
@@ -66,21 +83,40 @@ func initX() error {
 
 	// Listen to the root window for property change events, used to check if
 	// the user changed the focused window or active workspace for example.
-	return xwindow.New(X, X.RootWin()).Listen(xproto.EventMaskPropertyChange)
+	return xwindow.New(X, X.RootWin()).Listen(xproto.EventMaskPropertyChange,
+		xproto.EventMaskEnterWindow,
+		xproto.EventMaskLeaveWindow,
+		xproto.EventMaskPointerMotion,
+		xproto.EventMaskPointerMotionHint,
+	)
 }
 
 func initFont() error {
-	fr := func(name string) ([]byte, error) {
-		return box.Find(path.Join("fonts", name))
-	}
-	fp, err := box.Find("fonts/cure.font")
+	//fr := func(name string) ([]byte, error) {
+	//return box.Find(path.Join("fonts", name))
+	//}
+	//fp, err := box.Find("fonts/cure.font")
+	//if err != nil {
+	//return err
+	//}
+	//face, err = plan9font.ParseFont(fp, fr)
+	//if err != nil {
+	//return err
+	//}
+	//b, err := ioutil.ReadFile(filepath.Join(os.Getenv("HOME"), "fonts/Inconsolata/Inconsolata Bold for Powerline.ttf"))
+	b, err := ioutil.ReadFile(filepath.Join(os.Getenv("HOME"), "fonts/FiraCode/Fura Code Medium Nerd Font Complete Mono.ttf"))
 	if err != nil {
 		return err
 	}
-	face, err = plan9font.ParseFont(fp, fr)
+
+	tt, err := truetype.Parse(b)
 	if err != nil {
 		return err
 	}
+	face = truetype.NewFace(tt, &truetype.Options{
+		Size:    16,
+		Hinting: font.HintingFull,
+	})
 
 	return nil
 }

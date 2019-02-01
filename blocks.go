@@ -2,11 +2,15 @@ package main
 
 import (
 	"bufio"
+	"bytes"
+	"fmt"
+	"io/ioutil"
 	"log"
 	"os"
 	"os/exec"
 	"path"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/BurntSushi/xgbutil"
@@ -17,57 +21,65 @@ import (
 	"github.com/fhs/gompd/mpd"
 	"github.com/fsnotify/fsnotify"
 	"github.com/rkoesters/xdg/basedir"
+	"golang.org/x/image/font"
 )
 
-func (bar *Bar) clock() {
+func (bar *Bar) clock() *Block {
 	// Initialize block.
-	block := bar.initBlock("clock", "?", 799, 'a', 0, "#445967", "#CCCCCC")
-
-	// Notify that the next block can be initialized.
-	bar.ready <- true
+	block := &Block{
+		ID:        "clock",
+		Width:     400,
+		TextAlign: AlignCenter,
+	}
 
 	// Show popup on clicking the left mouse button.
-	block.actions["button1"] = func() error {
-		if block.popup != nil {
-			block.popup = block.popup.destroy()
-			return nil
+	//block.OnClick(func() error {
+	//if block.popup != nil {
+	//block.popup = block.popup.destroy()
+	//return nil
+	//}
+
+	//var err error
+	//block.popup, err = initPopup((bar.w/2)-(178/2), 29, 178, 129, "#EEEEEE", "#021B21")
+	//if err != nil {
+	//return err
+	//}
+
+	//return block.popup.clock()
+	//})
+
+	go func() {
+		for {
+			// Compose block text.
+			txt := time.Now().Format("Monday, January 2th 03:04 PM")
+
+			// Redraw block.
+			if block.diff(txt) {
+				block.redraw(bar)
+			}
+
+			// Update every 45 seconds.
+			time.Sleep(30 * time.Second)
 		}
-
-		var err error
-		block.popup, err = initPopup((bar.w/2)-(178/2), 29, 178, 129, "#EEEEEE",
-			"#021B21")
-		if err != nil {
-			return err
-		}
-
-		return block.popup.clock()
-	}
-
-	for {
-		// Compose block text.
-		txt := time.Now().Format("Monday, January 2th 03:04 PM")
-
-		// Redraw block.
-		if block.diff(txt) {
-			bar.redraw <- block
-		}
-
-		// Update every 45 seconds.
-		time.Sleep(45 * time.Second)
-	}
+	}()
+	return block
 }
 
 func (bar *Bar) music() {
 	// Initialize block.
-	block := bar.initBlock("music", "»  ", 660, 'r', -12, "#3C4F5B", "#CCCCCC")
+	block := &Block{
+		ID:        "music",
+		Width:     660,
+		TextAlign: AlignRight,
+	}
 
 	// Notify that the next block can be initialized.
-	bar.ready <- true
+	//bar.ready <- true
 
 	// Connect to MPD.
 	c, err := mpd.Dial("tcp", ":6600")
 	if err != nil {
-		log.Fatalln(err)
+		log.Fatalf("unable to connect to mpd: %v", err)
 	}
 
 	// Keep connection alive by pinging ever 45 seconds.
@@ -78,14 +90,14 @@ func (bar *Bar) music() {
 			if err := c.Ping(); err != nil {
 				c, err = mpd.Dial("tcp", ":6600")
 				if err != nil {
-					log.Fatalln(err)
+					log.Fatalf("unable to connect to mpd: %v", err)
 				}
 			}
 		}
 	}()
 
 	// Show popup on clicking the left mouse button.
-	block.actions["button1"] = func() error {
+	block.OnClick(func() error {
 		if block.popup != nil {
 			block.popup = block.popup.destroy()
 			return nil
@@ -98,27 +110,23 @@ func (bar *Bar) music() {
 		}
 
 		return block.popup.music(c)
-	}
+	})
 
 	// Toggle play/pause on clicking the right mouse button.
-	block.actions["button3"] = func() error {
+	block.AddAction("button3", func() error {
 		status, err := c.Status()
 		if err != nil {
 			return err
 		}
 
 		return c.Pause(status["state"] != "pause")
-	}
+	})
 
 	// Previous song on scrolling up.
-	block.actions["button4"] = func() error {
-		return c.Previous()
-	}
+	block.AddAction("button4", c.Previous)
 
 	// Next song on on scrolling down..
-	block.actions["button5"] = func() error {
-		return c.Next()
-	}
+	block.AddAction("button5", c.Next)
 
 	// Watch MPD for events.
 	w, err := mpd.NewWatcher("tcp", ":6600", "", "player")
@@ -144,7 +152,7 @@ func (bar *Bar) music() {
 
 		// Redraw block.
 		if block.diff(txt) {
-			bar.redraw <- block
+			block.redraw(bar)
 
 			// Redraw popup.
 			if block.popup != nil {
@@ -160,18 +168,23 @@ func (bar *Bar) music() {
 
 func (bar *Bar) todo() {
 	// Initialize block.
-	block := bar.initBlock("todo", "¢", 29, 'c', 0, "#5394C9", "#FFFFFF")
+	block := &Block{
+		ID:        "todo",
+		Text:      "¢",
+		Width:     29,
+		TextAlign: AlignCenter,
+	}
 
 	// Notify that the next block can be initialized.
-	bar.ready <- true
+	//bar.ready <- true
 
 	// Show popup on clicking the left mouse button.
-	block.actions["button1"] = func() error {
+	block.OnClick(func() error {
 		cmd := exec.Command("st", "micro", "-savecursor", "false", path.Join(
 			basedir.Home, ".todo"))
 		cmd.Stdout = os.Stdout
 		return cmd.Run()
-	}
+	})
 
 	// Watch file for events.
 	w, err := fsnotify.NewWatcher()
@@ -204,7 +217,7 @@ func (bar *Bar) todo() {
 
 		// Redraw block.
 		if block.diff(txt) {
-			bar.redraw <- block
+			block.redraw(bar)
 		}
 
 		// Listen for next write event.
@@ -215,13 +228,20 @@ func (bar *Bar) todo() {
 	}
 }
 
-func (bar *Bar) window() {
+func (bar *Bar) window() *Block {
 	// Initialize blocks.
-	bar.initBlock("windowIcon", "º", 21, 'l', 12, "#37BF8D", "#FFFFFF")
-	block := bar.initBlock("window", "?", 200, 'c', 0, "#37BF8D", "#FFFFFF")
+	const (
+		bw  = 340
+		pad = 8
+	)
+	block := &Block{
+		Width:     bw,
+		TextAlign: AlignLeft,
+		TextPad:   pad,
+	}
 
 	// Notify that the next block can be initialized.
-	bar.ready <- true
+	//bar.ready <- true
 
 	// TODO: This doesn't check for window title changes.
 	xevent.PropertyNotifyFun(func(_ *xgbutil.XUtil, ev xevent.
@@ -252,42 +272,54 @@ func (bar *Bar) window() {
 				txt = "?"
 			}
 		}
-		txt = trim(txt, 34)
 
 		// Redraw block.
 		if block.diff(txt) {
-			bar.redraw <- block
+			block.redraw(bar)
 		}
 	}).Connect(X, X.RootWin())
+	return block
 }
 
-func (bar *Bar) workspace() {
-	// Initialize block.
-	blockWWW := bar.initBlock("www", "¼      www", 74, 'l', 10, "#5394C9",
-		"#FFFFFF")
-	blockIRC := bar.initBlock("irc", "½      irc", 67, 'l', 10, "#5394C9",
-		"#FFFFFF")
-	blockSRC := bar.initBlock("src", "¾      src", 70, 'l', 10, "#5394C9",
-		"#FFFFFF")
+func (bar *Bar) workspace() []*Block {
+	ws, err := ewmh.DesktopNamesGet(X)
+	if err != nil {
+		log.Fatal(err)
+	}
+	bs := make([]*Block, 0)
+
+	var pwsp, nwsp int
+
+	for i, d := range ws {
+		pw := (font.MeasureString(face, d).Ceil() + 4)
+		pw = 16 * (1 + pw/16)
+		if pw < 32 {
+			pw = 32
+		}
+		b := &Block{
+			Width:     pw,
+			Text:      d,
+			TextAlign: AlignCenter,
+			BGColor:   "#5394C9",
+		}
+		n := i
+		b.OnClick(func() error {
+			return ewmh.CurrentDesktopReq(X, n)
+		})
+		b.AddAction("button4", func() error {
+			return ewmh.CurrentDesktopReq(X, pwsp)
+		})
+		b.AddAction("button5", func() error {
+			return ewmh.CurrentDesktopReq(X, nwsp)
+		})
+		bs = append(bs, b)
+	}
 
 	// Notify that the next block can be initialized.
-	bar.ready <- true
-
-	// Change active workspace on clicking on one of the blocks.
-	blockWWW.actions["button1"] = func() error {
-		return ewmh.CurrentDesktopReq(X, 0)
-	}
-	blockIRC.actions["button1"] = func() error {
-		return ewmh.CurrentDesktopReq(X, 1)
-	}
-	blockSRC.actions["button1"] = func() error {
-		return ewmh.CurrentDesktopReq(X, 2)
-	}
+	//bar.ready <- true
 
 	var owsp uint
-	var pwsp, nwsp int
-	xevent.PropertyNotifyFun(func(_ *xgbutil.XUtil, ev xevent.
-		PropertyNotifyEvent) {
+	xevent.PropertyNotifyFun(func(_ *xgbutil.XUtil, ev xevent.PropertyNotifyEvent) {
 		// Only listen to `_NET_ACTIVE_WINDOW` events.
 		atom, err := xprop.Atm(X, "_NET_CURRENT_DESKTOP")
 		if err != nil {
@@ -303,51 +335,112 @@ func (bar *Bar) workspace() {
 			log.Println(err)
 		}
 
-		// Set colors accordingly.
-		switch wsp {
-		case 0:
-			blockWWW.bg = "#72A7D3"
-			blockIRC.bg = "#5394C9"
-			blockSRC.bg = "#5394C9"
-
-			pwsp = 2
-			nwsp = 1
-		case 1:
-			blockWWW.bg = "#5394C9"
-			blockIRC.bg = "#72A7D3"
-			blockSRC.bg = "#5394C9"
-
-			pwsp = 0
-			nwsp = 2
-		case 2:
-			blockWWW.bg = "#5394C9"
-			blockIRC.bg = "#5394C9"
-			blockSRC.bg = "#72A7D3"
-
-			pwsp = 1
-			nwsp = 0
+		for i, b := range bs {
+			if i == int(wsp) {
+				b.BGColor = "#72A7D3"
+				pwsp = i - 1
+				if pwsp < 0 {
+					pwsp = len(bs) - 1
+				}
+				nwsp = i + 1
+				if nwsp >= len(bs) {
+					nwsp = 0
+				}
+			} else {
+				b.BGColor = "#5394C9"
+			}
 		}
-
 		if owsp != wsp {
-			bar.redraw <- blockWWW
-			bar.redraw <- blockIRC
-			bar.redraw <- blockSRC
-
+			bs[owsp].redraw(bar)
+			bs[wsp].redraw(bar)
 			owsp = wsp
 		}
 	}).Connect(X, X.RootWin())
+	return bs
+}
 
-	prevFun := func() error {
-		return ewmh.CurrentDesktopReq(X, pwsp)
-	}
-	nextFun := func() error {
-		return ewmh.CurrentDesktopReq(X, nwsp)
+func (bar *Bar) battery() *Block {
+	// Initialize block.
+	block := &Block{
+		ID:        "battery",
+		Text:      "?",
+		Width:     72,
+		TextAlign: AlignCenter,
 	}
 
-	blockWWW.actions["button4"] = prevFun
-	blockWWW.actions["button5"] = nextFun
-	blockIRC.actions["button4"] = prevFun
-	blockIRC.actions["button5"] = nextFun
-	blockSRC.actions["button4"] = prevFun
-	blockSRC.actions["button5"] = nextFun
+	// Notify that the next block can be initialized.
+	//bar.ready <- true
+
+	go func() {
+
+		for {
+			b, err := ioutil.ReadFile("/sys/class/power_supply/BAT0/capacity")
+			if err != nil {
+				log.Printf("error reading battery capacity: %v", err)
+			}
+			b = bytes.TrimSpace(b)
+
+			txt := string(b) + "%"
+			{
+				b, err := ioutil.ReadFile("/sys/class/power_supply/BAT0/status")
+				if err != nil {
+					log.Printf("error reading battery status: %v", err)
+				}
+				b = bytes.TrimSpace(b)
+
+				if string(b) != "Discharging" {
+					txt = fmt.Sprintf("%s %s", txt, string(b))
+				}
+			}
+			txt = fmt.Sprintf("\uf578 %s", txt)
+
+			// Redraw block.
+			if block.diff(txt) {
+				block.redraw(bar)
+			}
+
+			// Update every 45 seconds.
+			time.Sleep(60 * time.Second)
+		}
+
+	}()
+	return block
+}
+
+func (bar *Bar) wifi() *Block {
+	// Initialize block.
+	block := &Block{
+		Width:     200,
+		TextAlign: AlignCenter,
+	}
+
+	// Notify that the next block can be initialized.
+	//bar.ready <- true
+
+	go func() {
+		for {
+			iface := "wlp2s0"
+			if i := os.Getenv("WIFI_INTERFACE"); i != "" {
+				iface = i
+			}
+			cmd := exec.Command("iwgetid", "-r", iface)
+			b, err := cmd.CombinedOutput()
+			if err != nil {
+				log.Printf("err = %+v\n", err)
+			}
+			txt := strings.TrimSpace(string(b))
+			if txt == "" {
+				txt = "\ufaa9 not connected"
+			} else {
+				txt = fmt.Sprintf("\ufaa8 %s", txt)
+			}
+
+			if block.diff(txt) {
+				block.redraw(bar)
+			}
+
+			time.Sleep(15 * time.Second)
+		}
+	}()
+	return block
 }

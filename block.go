@@ -1,8 +1,6 @@
 package main
 
 import (
-	"image"
-
 	"github.com/BurntSushi/xgbutil/xgraphics"
 )
 
@@ -11,22 +9,28 @@ type Block struct {
 	// The sub-image that represents the block.
 	img *xgraphics.Image
 
+	// The text the block should display.
+	ID      string
+	Text    string
+	Width   int
+	TextPad int
+	Dirty   bool
+
 	// The x coordinate and width of the block.
-	x, w int
+	//x, w int
+	x int
 
 	// Additional x offset to further tweak the location of the text.
 	xoff int
 
-	// The text the block should display.
-	txt string
-
 	// The aligment of the text, this can be `l` for left aligment, `c` for
 	// center aligment, `r` for right aligment and `a` for absolute center
 	// aligment.
-	align rune
+	TextAlign Alignment
 
 	// The foreground and background colors in hex.
-	bg, fg string
+	FGColor string
+	BGColor string
 
 	// A map with functions to execute on button events. Accepted button strings
 	// are `button0` to `button5`
@@ -36,45 +40,62 @@ type Block struct {
 	popup *Popup
 }
 
-func (bar *Bar) initBlock(name, txt string, w int, align rune, xoff int, bg,
-	fg string) *Block {
-	block := new(Block)
-
-	block.img = bar.img.SubImage(image.Rect(bar.xsum, 0, bar.xsum+w, bar.
-		h)).(*xgraphics.Image)
-	block.x = bar.xsum
-	block.w = w
-	block.xoff = xoff
-	block.txt = txt
-	block.align = align
-	block.bg = bg
-	block.fg = fg
-	block.actions = map[string]func() error{
-		"button1": func() error { return nil },
-		"button2": func() error { return nil },
-		"button3": func() error { return nil },
-		"button4": func() error { return nil },
-		"button5": func() error { return nil },
+func (b *Block) AddAction(event string, action func() error) {
+	if b.actions == nil {
+		b.actions = make(map[string]func() error)
 	}
+	b.actions[event] = action
+}
 
-	// Add the width of this block to the xsum.
-	bar.xsum += w
+func (b *Block) OnClick(action func() error) {
+	b.AddAction("button1", action)
+}
 
-	// Store the block in map.
-	bar.blocks.Store(name, block)
+func (b *Block) RunAction(event string) error {
+	if b.actions == nil {
+		return nil
+	}
+	if fn, ok := b.actions[event]; ok {
+		return fn()
+	}
+	return nil
+}
 
-	// Draw block.
-	bar.redraw <- block
+//func (bar *Bar) initBlock(name, txt string, w int, align Alignment, xoff int, bg, fg string) *Block {
+//block := new(Block)
 
-	return block
+////block.x = bar.xsum
+//block.Width = w
+//block.xoff = xoff
+//block.Text = txt
+//block.TextAlign = align
+//block.BGColor = bg
+//block.Dirty = true
+////block.FGColor = fg
+
+//// Add the width of this block to the xsum.
+////bar.xsum += w
+
+//// Store the block in map.
+////bar.blocks = append(bar.blocks, block)
+
+//// Draw block.
+////block.redraw(bar)
+
+//return block
+//}
+
+func (b *Block) redraw(bar *Bar) {
+	b.Dirty = true
+	bar.redraw <- b
 }
 
 // TODO: Make this function more versatile by allowing different and multiple
 // properties to be checked.
 func (block *Block) diff(txt string) bool {
-	if block.txt == txt {
+	if block.Text == txt {
 		return false
 	}
-	block.txt = txt
+	block.Text = txt
 	return true
 }

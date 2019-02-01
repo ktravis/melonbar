@@ -4,8 +4,6 @@ import (
 	"fmt"
 	"image"
 	"log"
-	"strconv"
-	"sync"
 
 	"github.com/BurntSushi/xgb/xproto"
 	"github.com/BurntSushi/xgbutil"
@@ -17,6 +15,17 @@ import (
 	"golang.org/x/image/math/fixed"
 )
 
+type Alignment int
+
+const (
+	AlignCenter Alignment = iota
+	AlignLeft
+	AlignRight
+
+	DefaultBGColor = "#222222"
+	DefaultFGColor = "#cccccc"
+)
+
 // Bar is a struct with information about the bar.
 type Bar struct {
 	// Bar window, and bar image.
@@ -26,23 +35,25 @@ type Bar struct {
 	// The width and height of the bar.
 	w, h int
 
-	// This is a sum of all of the block widths, used to draw a block to the
-	// right of the last block.
-	xsum int
-
 	// Text drawer.
 	drawer *font.Drawer
 
-	// A map with information about the block, see the `Block` type.
-	blocks *sync.Map
+	groups []Group
 
-	// A channel where the block should be send to to once its ready to be
-	// redrawn.
 	redraw chan *Block
+}
 
-	// A channel where a boolean should be send once a block has initizalized,
-	// notifying that the next block can intialize.
-	ready chan bool
+type Group struct {
+	Align  Alignment
+	Blocks []*Block
+}
+
+func (g *Group) Width() int {
+	var w int
+	for _, b := range g.Blocks {
+		w += b.Width
+	}
+	return w
 }
 
 func initBar(x, y, w, h int) (*Bar, error) {
@@ -55,8 +66,14 @@ func initBar(x, y, w, h int) (*Bar, error) {
 	if err != nil {
 		return nil, err
 	}
-	bar.win.Create(X.RootWin(), x, y, w, h, xproto.CwBackPixel|xproto.
-		CwEventMask, 0x000000, xproto.EventMaskButtonPress)
+	bar.win.Create(X.RootWin(), x, y, w, h, xproto.CwBackPixel|xproto.CwEventMask, 0x000000, xproto.EventMaskButtonPress)
+	bar.win.Listen(
+		xproto.EventMaskButtonPress,
+		xproto.EventMaskEnterWindow,
+		xproto.EventMaskLeaveWindow,
+		xproto.EventMaskPointerMotion,
+		xproto.EventMaskPointerMotionHint,
+	)
 
 	// EWMH stuff to make the window behave like an actual bar.
 	// XXX: `WmStateSet` and `WmDesktopSet` are basically here to keep OpenBox
@@ -88,6 +105,11 @@ func initBar(x, y, w, h int) (*Bar, error) {
 	if err := bar.img.XSurfaceSet(bar.win.Id); err != nil {
 		return nil, err
 	}
+	// draw the background - but this will need to be cleared if other things move? Can other things move?
+	bg := hexToBGRA(DefaultBGColor)
+	bar.img.For(func(cx, cy int) xgraphics.BGRA {
+		return bg
+	})
 	bar.img.XDraw()
 
 	bar.w = w
@@ -98,95 +120,103 @@ func initBar(x, y, w, h int) (*Bar, error) {
 		Face: face,
 	}
 
-	bar.blocks = new(sync.Map)
+	//bar.blocks = new(sync.Map)
 	bar.redraw = make(chan *Block)
+
+	xevent.EnterNotifyFun(func(_ *xgbutil.XUtil, ev xevent.EnterNotifyEvent) {
+		fmt.Printf("enter = %+v\n", ev)
+	}).Connect(X, bar.win.Id)
+
+	xevent.MotionNotifyFun(func(_ *xgbutil.XUtil, ev xevent.MotionNotifyEvent) {
+		fmt.Printf("motion = %+v\n", ev)
+	}).Connect(X, bar.win.Id)
+
+	xevent.LeaveNotifyFun(func(_ *xgbutil.XUtil, ev xevent.LeaveNotifyEvent) {
+		fmt.Printf("leave = %+v\n", ev)
+	}).Connect(X, bar.win.Id)
 
 	// Listen to mouse events and execute the required function.
 	xevent.ButtonPressFun(func(_ *xgbutil.XUtil, ev xevent.ButtonPressEvent) {
-		// Determine what block the cursor is in.
-		var block *Block
-		bar.blocks.Range(func(name, i interface{}) bool {
-			block = i.(*Block)
 
+		bar.eachBlock(func(xoff int, block *Block) bool {
+
+			ex := int(ev.EventX)
 			// XXX: Hack for music block.
-			if name == "music" {
-				tw := font.MeasureString(face, block.txt).Ceil()
-				if ev.EventX >= int16(block.x+(block.w-tw+(block.xoff*2))) &&
-					ev.EventX < int16(block.x+block.w) {
+			if block.ID == "music" {
+				tw := font.MeasureString(face, block.Text).Ceil()
+				if ex >= xoff+(block.Width-tw+(block.xoff*2)) && ex < xoff+block.Width {
+					if err := block.RunAction(fmt.Sprintf("button%d", ev.Detail)); err != nil {
+						log.Println(err)
+					}
 					return false
 				}
-				block = nil
-				return true
 			}
 
-			// XXX: Hack for clock block.
-			if name == "clock" {
-				tw := bar.drawer.MeasureString(block.txt).Ceil()
-				if ev.EventX >= int16(((bar.w/2)-(tw/2))-13) && ev.
-					EventX < int16(((bar.w/2)+(tw/2))+13) {
-					return false
+			if ex >= xoff && ex < xoff+block.Width {
+				if err := block.RunAction(fmt.Sprintf("button%d", ev.Detail)); err != nil {
+					log.Println(err)
 				}
-				block = nil
-				return true
-			}
-
-			if ev.EventX >= int16(block.x) && ev.EventX < int16(block.x+block.
-				w) {
 				return false
 			}
-			block = nil
 			return true
 		})
 
-		// Execute the function as specified.
-		if block != nil {
-			if err := block.actions["button"+strconv.Itoa(int(ev.
-				Detail))](); err != nil {
-				log.Println(err)
-			}
-		}
 	}).Connect(X, bar.win.Id)
 
 	return bar, nil
 }
 
-func (bar *Bar) draw(block *Block) error {
-	// Calculate the required x coordinate for the different aligments.
-	var x int
-	tw := bar.drawer.MeasureString(block.txt).Ceil()
-	switch block.align {
-	case 'l':
-		x = block.x
-	case 'c':
-		x = block.x + ((block.w / 2) - (tw / 2))
-	case 'r':
-		x = (block.x + block.w) - tw
-	case 'a':
-		x = (bar.w / 2) - (tw / 2)
-	default:
-		return fmt.Errorf("draw %#U: Not a valid aligment rune", block.align)
-	}
-	x += block.xoff
-
+func (bar *Bar) draw(xoff int, block *Block) error {
 	// Color the background.
 	block.img.For(func(cx, cy int) xgraphics.BGRA {
 		// XXX: Hack for music block.
-		if block.w == 660 {
-			if cx < x+block.xoff {
+		bg := block.BGColor
+		if bg == "" {
+			bg = DefaultBGColor
+		}
+		if block.ID == "music" {
+			if cx < xoff+block.xoff {
 				return hexToBGRA("#445967")
 			}
-			return hexToBGRA(block.bg)
+			return hexToBGRA(bg)
 		}
 
-		return hexToBGRA(block.bg)
+		return hexToBGRA(bg)
 	})
 
 	// Set text color.
-	bar.drawer.Src = image.NewUniform(hexToBGRA(block.fg))
+	fg := block.FGColor
+	if fg == "" {
+		fg = DefaultFGColor
+	}
+	bar.drawer.Src = image.NewUniform(hexToBGRA(fg))
 
-	// Draw the text.
-	bar.drawer.Dot = fixed.P(x, 18)
-	bar.drawer.DrawString(block.txt)
+	txt := block.Text
+	quota := block.Width - 2*block.TextPad
+	for n := len(txt); n > 0; n-- {
+		tw := font.MeasureString(face, txt).Ceil()
+		if tw < quota {
+			break
+		}
+		txt = txt[:n] + "..."
+	}
+
+	tw := bar.drawer.MeasureString(txt).Ceil()
+	var tx int
+	switch block.TextAlign {
+	case AlignLeft:
+		tx = xoff + block.TextPad
+	case AlignCenter:
+		tx = xoff + ((block.Width / 2) - (tw / 2))
+	case AlignRight:
+		tx = (xoff + block.Width) - tw
+	default:
+		return fmt.Errorf("draw (%v): Not a valid aligment type", block.TextAlign)
+	}
+
+	// swap this for the xgbutil text stuff
+	bar.drawer.Dot = fixed.P(tx, 18)
+	bar.drawer.DrawString(txt)
 
 	// Redraw the bar.
 	block.img.XDraw()
@@ -195,21 +225,47 @@ func (bar *Bar) draw(block *Block) error {
 	return nil
 }
 
-func (bar *Bar) initBlocks(blocks []func()) {
-	bar.ready = make(chan bool)
-
-	for _, f := range blocks {
-		go f()
-		<-bar.ready
-	}
-
-	close(bar.ready)
+func (bar *Bar) SetGroups(gg ...Group) {
+	bar.groups = gg
+	bar.eachBlock(func(xoff int, b *Block) bool {
+		b.img = bar.img.SubImage(image.Rect(xoff, 0, xoff+b.Width, bar.h)).(*xgraphics.Image)
+		b.Dirty = true
+		return true
+	})
 }
 
-func (bar *Bar) listen() {
-	for {
-		if err := bar.draw(<-bar.redraw); err != nil {
-			log.Fatalln(err)
+func (bar *Bar) eachBlock(fn func(int, *Block) bool) {
+	for _, g := range bar.groups {
+		xoff := 0
+		goff := 0
+		switch g.Align {
+		case AlignLeft:
+			xoff = 0
+		case AlignCenter:
+			xoff = bar.w/2 - g.Width()/2
+		case AlignRight:
+			xoff = bar.w - g.Width()
 		}
+		for _, b := range g.Blocks {
+			if !fn(xoff+goff, b) {
+				break
+			}
+			goff += b.Width
+		}
+	}
+}
+
+func (bar *Bar) drawLoop() {
+	for {
+		bar.eachBlock(func(xoff int, b *Block) bool {
+			if b.Dirty {
+				if err := bar.draw(xoff, b); err != nil {
+					log.Fatalln(err)
+				}
+				b.Dirty = false
+			}
+			return true
+		})
+		<-bar.redraw
 	}
 }
